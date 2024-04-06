@@ -1,6 +1,5 @@
 libcxx/src/**/*.cpp     merge=libcxx-reformat
 libcxx/include/**/*.h   merge=libcxx-reformat
-
 # Explicitly handle files with no extension
 libcxx/include/__availability               merge=libcxx-reformat
 libcxx/include/__bit_reference              merge=libcxx-reformat
@@ -140,3 +139,4 @@ libcxx/include/valarray                     merge=libcxx-reformat
 libcxx/include/variant                      merge=libcxx-reformat
 libcxx/include/vector                       merge=libcxx-reformat
 libcxx/include/version                      merge=libcxx-reformat
+clang-19.0.0 filter=lfs diff=lfs merge=lfs -text
