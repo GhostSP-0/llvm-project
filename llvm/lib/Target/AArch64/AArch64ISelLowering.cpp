@@ -5035,8 +5035,8 @@ static inline SDValue getPTrue(SelectionDAG &DAG, SDLoc DL, EVT VT,
                      DAG.getTargetConstant(Pattern, DL, MVT::i32));
 }
 
-static SDValue optimizeWhile(SDValue Op, SelectionDAG &DAG, bool IsSigned,
-                             bool IsLess, bool IsEqual) {
+static SDValue optimizeIncrementingWhile(SDValue Op, SelectionDAG &DAG,
+                                         bool IsSigned, bool IsEqual) {
   if (!isa<ConstantSDNode>(Op.getOperand(1)) ||
       !isa<ConstantSDNode>(Op.getOperand(2)))
     return SDValue();
@@ -5044,12 +5044,9 @@ static SDValue optimizeWhile(SDValue Op, SelectionDAG &DAG, bool IsSigned,
   SDLoc dl(Op);
   APInt X = Op.getConstantOperandAPInt(1);
   APInt Y = Op.getConstantOperandAPInt(2);
-  APInt NumActiveElems;
   bool Overflow;
-  if (IsLess)
-    NumActiveElems = IsSigned ? Y.ssub_ov(X, Overflow) : Y.usub_ov(X, Overflow);
-  else
-    NumActiveElems = IsSigned ? X.ssub_ov(Y, Overflow) : X.usub_ov(Y, Overflow);
+  APInt NumActiveElems =
+      IsSigned ? Y.ssub_ov(X, Overflow) : Y.usub_ov(X, Overflow);
 
   if (Overflow)
     return SDValue();
@@ -5396,29 +5393,17 @@ SDValue AArch64TargetLowering::LowerINTRINSIC_WO_CHAIN(SDValue Op,
     return SDValue();
   }
   case Intrinsic::aarch64_sve_whilelo:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/false, /*IsLess=*/true,
-                         /*IsEqual=*/false);
+    return optimizeIncrementingWhile(Op, DAG, /*IsSigned=*/false,
+                                     /*IsEqual=*/false);
   case Intrinsic::aarch64_sve_whilelt:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/true, /*IsLess=*/true,
-                         /*IsEqual=*/false);
+    return optimizeIncrementingWhile(Op, DAG, /*IsSigned=*/true,
+                                     /*IsEqual=*/false);
   case Intrinsic::aarch64_sve_whilels:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/false, /*IsLess=*/true,
-                         /*IsEqual=*/true);
+    return optimizeIncrementingWhile(Op, DAG, /*IsSigned=*/false,
+                                     /*IsEqual=*/true);
   case Intrinsic::aarch64_sve_whilele:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/true, /*IsLess=*/true,
-                         /*IsEqual=*/true);
-  case Intrinsic::aarch64_sve_whilege:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/true, /*IsLess=*/false,
-                         /*IsEqual=*/true);
-  case Intrinsic::aarch64_sve_whilegt:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/true, /*IsLess=*/false,
-                         /*IsEqual=*/false);
-  case Intrinsic::aarch64_sve_whilehs:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/false, /*IsLess=*/false,
-                         /*IsEqual=*/true);
-  case Intrinsic::aarch64_sve_whilehi:
-    return optimizeWhile(Op, DAG, /*IsSigned=*/false, /*IsLess=*/false,
-                         /*IsEqual=*/false);
+    return optimizeIncrementingWhile(Op, DAG, /*IsSigned=*/true,
+                                     /*IsEqual=*/true);
   case Intrinsic::aarch64_sve_sunpkhi:
     return DAG.getNode(AArch64ISD::SUNPKHI, dl, Op.getValueType(),
                        Op.getOperand(1));
@@ -11851,35 +11836,6 @@ static bool isREVMask(ArrayRef<int> M, EVT VT, unsigned BlockSize) {
   return true;
 }
 
-static bool isZIPMask(ArrayRef<int> M, EVT VT, unsigned &WhichResult) {
-  unsigned NumElts = VT.getVectorNumElements();
-  if (NumElts % 2 != 0)
-    return false;
-  WhichResult = (M[0] == 0 ? 0 : 1);
-  unsigned Idx = WhichResult * NumElts / 2;
-  for (unsigned i = 0; i != NumElts; i += 2) {
-    if ((M[i] >= 0 && (unsigned)M[i] != Idx) ||
-        (M[i + 1] >= 0 && (unsigned)M[i + 1] != Idx + NumElts))
-      return false;
-    Idx += 1;
-  }
-
-  return true;
-}
-
-static bool isUZPMask(ArrayRef<int> M, EVT VT, unsigned &WhichResult) {
-  unsigned NumElts = VT.getVectorNumElements();
-  WhichResult = (M[0] == 0 ? 0 : 1);
-  for (unsigned i = 0; i != NumElts; ++i) {
-    if (M[i] < 0)
-      continue; // ignore UNDEF indices
-    if ((unsigned)M[i] != 2 * i + WhichResult)
-      return false;
-  }
-
-  return true;
-}
-
 static bool isTRNMask(ArrayRef<int> M, EVT VT, unsigned &WhichResult) {
   unsigned NumElts = VT.getVectorNumElements();
   if (NumElts % 2 != 0)
@@ -17930,16 +17886,14 @@ static SDValue tryCombineToBSL(SDNode *N, TargetLowering::DAGCombinerInfo &DCI,
   EVT VT = N->getValueType(0);
   SelectionDAG &DAG = DCI.DAG;
   SDLoc DL(N);
+  const auto &Subtarget = DAG.getSubtarget<AArch64Subtarget>();
 
   if (!VT.isVector())
     return SDValue();
 
-  // The combining code currently only works for NEON vectors. In particular,
-  // it does not work for SVE when dealing with vectors wider than 128 bits.
-  // It also doesn't work for streaming mode because it causes generating
-  // bsl instructions that are invalid in streaming mode.
-  if (TLI.useSVEForFixedLengthVectorVT(
-          VT, !DAG.getSubtarget<AArch64Subtarget>().isNeonAvailable()))
+  // The combining code works for NEON, SVE2 and SME.
+  if (TLI.useSVEForFixedLengthVectorVT(VT, !Subtarget.isNeonAvailable()) ||
+      (VT.isScalableVector() && !Subtarget.hasSVE2()))
     return SDValue();
 
   SDValue N0 = N->getOperand(0);
@@ -17994,6 +17948,14 @@ static SDValue tryCombineToBSL(SDNode *N, TargetLowering::DAGCombinerInfo &DCI,
   uint64_t BitMask = Bits == 64 ? -1ULL : ((1ULL << Bits) - 1);
   for (int i = 1; i >= 0; --i)
     for (int j = 1; j >= 0; --j) {
+      APInt Val1, Val2;
+
+      if (ISD::isConstantSplatVector(N0->getOperand(i).getNode(), Val1) &&
+          ISD::isConstantSplatVector(N1->getOperand(j).getNode(), Val2) &&
+          (BitMask & ~Val1.getZExtValue()) == Val2.getZExtValue()) {
+        return DAG.getNode(AArch64ISD::BSP, DL, VT, N0->getOperand(i),
+                           N0->getOperand(1 - i), N1->getOperand(1 - j));
+      }
       BuildVectorSDNode *BVN0 = dyn_cast<BuildVectorSDNode>(N0->getOperand(i));
       BuildVectorSDNode *BVN1 = dyn_cast<BuildVectorSDNode>(N1->getOperand(j));
       if (!BVN0 || !BVN1)
@@ -18009,9 +17971,8 @@ static SDValue tryCombineToBSL(SDNode *N, TargetLowering::DAGCombinerInfo &DCI,
           break;
         }
       }
-
       if (FoundMatch)
-        return DAG.getNode(AArch64ISD::BSP, DL, VT, SDValue(BVN0, 0),
+        return DAG.getNode(AArch64ISD::BSP, DL, VT, N0->getOperand(i),
                            N0->getOperand(1 - i), N1->getOperand(1 - j));
     }
 
@@ -24555,6 +24516,18 @@ SDValue AArch64TargetLowering::PerformDAGCombine(SDNode *N,
     if (auto R = foldOverflowCheck(N, DAG, /* IsAdd */ false))
       return R;
     return performFlagSettingCombine(N, DCI, AArch64ISD::SBC);
+  case AArch64ISD::BICi: {
+    APInt DemandedBits =
+        APInt::getAllOnes(N->getValueType(0).getScalarSizeInBits());
+    APInt DemandedElts =
+        APInt::getAllOnes(N->getValueType(0).getVectorNumElements());
+
+    if (DAG.getTargetLoweringInfo().SimplifyDemandedBits(
+            SDValue(N, 0), DemandedBits, DemandedElts, DCI))
+      return SDValue();
+
+    break;
+  }
   case ISD::XOR:
     return performXorCombine(N, DAG, DCI, Subtarget);
   case ISD::MUL:
@@ -27595,6 +27568,24 @@ bool AArch64TargetLowering::SimplifyDemandedBitsForTargetNode(
     // used - simplify to just Val.
     return TLO.CombineTo(Op, ShiftR->getOperand(0));
   }
+  case AArch64ISD::BICi: {
+    // Fold BICi if all destination bits already known to be zeroed
+    SDValue Op0 = Op.getOperand(0);
+    KnownBits KnownOp0 =
+        TLO.DAG.computeKnownBits(Op0, OriginalDemandedElts, Depth + 1);
+    // Op0 &= ~(ConstantOperandVal(1) << ConstantOperandVal(2))
+    uint64_t BitsToClear = Op->getConstantOperandVal(1)
+                           << Op->getConstantOperandVal(2);
+    APInt AlreadyZeroedBitsToClear = BitsToClear & KnownOp0.Zero;
+    if (APInt(Known.getBitWidth(), BitsToClear)
+            .isSubsetOf(AlreadyZeroedBitsToClear))
+      return TLO.CombineTo(Op, Op0);
+
+    Known = KnownOp0 &
+            KnownBits::makeConstant(APInt(Known.getBitWidth(), ~BitsToClear));
+
+    return false;
+  }
   case ISD::INTRINSIC_WO_CHAIN: {
     if (auto ElementSize = IsSVECntIntrinsic(Op)) {
       unsigned MaxSVEVectorSizeInBits = Subtarget->getMaxSVEVectorSizeInBits();
@@ -27877,3 +27868,46 @@ bool AArch64TargetLowering::hasInlineStackProbe(
   return !Subtarget->isTargetWindows() &&
          MF.getInfo<AArch64FunctionInfo>()->hasStackProbing();
 }
+
+#ifndef NDEBUG
+void AArch64TargetLowering::verifyTargetSDNode(const SDNode *N) const {
+  switch (N->getOpcode()) {
+  default:
+    break;
+  case AArch64ISD::SUNPKLO:
+  case AArch64ISD::SUNPKHI:
+  case AArch64ISD::UUNPKLO:
+  case AArch64ISD::UUNPKHI: {
+    assert(N->getNumValues() == 1 && "Expected one result!");
+    assert(N->getNumOperands() == 1 && "Expected one operand!");
+    EVT VT = N->getValueType(0);
+    EVT OpVT = N->getOperand(0).getValueType();
+    assert(OpVT.isVector() && VT.isVector() && OpVT.isInteger() &&
+           VT.isInteger() && "Expected integer vectors!");
+    assert(OpVT.getSizeInBits() == VT.getSizeInBits() &&
+           "Expected vectors of equal size!");
+    // TODO: Enable assert once bogus creations have been fixed.
+    // assert(OpVT.getVectorElementCount() == VT.getVectorElementCount()*2 &&
+    //       "Expected result vector with half the lanes of its input!");
+    break;
+  }
+  case AArch64ISD::TRN1:
+  case AArch64ISD::TRN2:
+  case AArch64ISD::UZP1:
+  case AArch64ISD::UZP2:
+  case AArch64ISD::ZIP1:
+  case AArch64ISD::ZIP2: {
+    assert(N->getNumValues() == 1 && "Expected one result!");
+    assert(N->getNumOperands() == 2 && "Expected two operands!");
+    EVT VT = N->getValueType(0);
+    EVT Op0VT = N->getOperand(0).getValueType();
+    EVT Op1VT = N->getOperand(1).getValueType();
+    assert(VT.isVector() && Op0VT.isVector() && Op1VT.isVector() &&
+           "Expected vectors!");
+    // TODO: Enable assert once bogus creations have been fixed.
+    // assert(VT == Op0VT && VT == Op1VT && "Expected matching vectors!");
+    break;
+  }
+  }
+}
+#endif
